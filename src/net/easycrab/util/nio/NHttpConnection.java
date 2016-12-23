@@ -9,25 +9,28 @@ import java.util.Map.Entry;
 
 public class NHttpConnection 
 {
-    private final String                HTTP_PROTOCOL = "HTTP/1.1";
-    private String                      url;
-    private boolean                     isPost;
-    private long                        timeout;
+    protected final String              HTTP_PROTOCOL = "HTTP/1.1";
+    protected String                    url;
+    protected boolean                   isPost;
+    protected long                      timeout;
     
-    private String                      host;
-    private int                         port;
-    private String                      path;
+    protected String                    host;
+    protected int                       port;
+    protected String                    path;
     
-    private int                         statusCode;
-    private String                      statusText;
+    protected int                       statusCode;
+    protected String                    statusText;
     
-    private HashMap<String, String>     requestHeaders;
-    private HashMap<String, String>     responseHeaders;
-    private NSocketConnection           connection;
+    protected HashMap<String, String>   requestHeaders;
+    protected HashMap<String, String>   responseHeaders;
+    protected NIOConnection             connection;
     
-    private boolean                     isConnected;
-    private boolean                     hasReqHeaderSent;
-    private boolean                     hasRespHeaderGot;
+    protected boolean                   isConnected;
+    protected boolean                   hasReqHeaderSent;
+    protected boolean                   hasRespHeaderGot;
+    
+    protected String                    acceptedProtocol = "http";
+    protected int                       defaultPortNum = 80;
     
     public NHttpConnection(String targetUrl, boolean isMethodPost, long timeout)
     {
@@ -131,7 +134,7 @@ public class NHttpConnection
         connection.read(timeout, data, offset, len);        
     }
     
-    private void ensureHeaderRead() throws Exception
+    protected void ensureHeaderRead() throws Exception
     {
         if (! isConnected) {
             throw new IOException("Connection is not established yet before reading data!");
@@ -149,7 +152,7 @@ public class NHttpConnection
         
     }
     
-    private void parseRequestUrl() throws Exception
+    protected void parseRequestUrl() throws Exception
     {
         if (url == null || url.length() == 0) {
             throw new IOException("Request URL shall not be empty!");
@@ -158,7 +161,7 @@ public class NHttpConnection
         int place = url.indexOf("://");
         if (place > 0) {
             String protocol = url.substring(0, place);
-            if (! "http".equalsIgnoreCase(protocol)) {
+            if (! acceptedProtocol.equalsIgnoreCase(protocol)) {
                 throw new IOException("Unsupport Protocol for request URL [" + url + "]");
 
             }
@@ -167,8 +170,7 @@ public class NHttpConnection
         place = urlNow.indexOf(':'); // try to find first colon
         int place2 = urlNow.indexOf('/'); // try to find first slash
         if (place < 0) {
-            // use default port number 80
-            port = 80;
+            port = defaultPortNum;
         }
         else if (place == 0) {
             throw new IOException("Invalid request URL. [" + url + "]");
@@ -211,7 +213,7 @@ public class NHttpConnection
 
     }
     
-    private void sendRequestHeader() throws Exception
+    protected void sendRequestHeader() throws Exception
     {
         StringBuilder sb = new StringBuilder();
         // Append Request Header
@@ -251,7 +253,7 @@ public class NHttpConnection
         
     }
     
-    private void readResponseHeader() throws Exception
+    protected void readResponseHeader() throws Exception
     {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         byte[] buffer = new byte[32];

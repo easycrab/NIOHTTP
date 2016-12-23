@@ -11,7 +11,7 @@ import java.util.Iterator;
 import java.util.Set;
 
 
-public class NSocketConnection
+public class NSocketConnection implements NIOConnection
 {
     private final int           BUFFER_CAPACITY = 256;
     

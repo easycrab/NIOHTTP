@@ -51,7 +51,8 @@ public class MyTestNIO
     }
     
     public static void main(String[] args) {
-        NHttpConnection conn = new NHttpConnection("http://101.231.126.26/share/tmp/bazi.apk", false, 5000);
+//        NHttpConnection conn = new NHttpConnection("http://101.231.126.26/share/tmp/bazi.apk", false, 5000);
+        NHttpsConnection conn = new NHttpsConnection("vip.163.com", false, 5000);
         
         try {
             System.out.println(getTimestamp() + " Ready to connect to server now...");

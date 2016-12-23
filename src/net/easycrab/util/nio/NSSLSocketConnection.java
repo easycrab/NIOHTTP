@@ -1,5 +1,6 @@
 package net.easycrab.util.nio;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -7,7 +8,7 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 import java.util.Iterator;
-import java.util.logging.Logger;
+import java.util.Set;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
@@ -16,26 +17,26 @@ import javax.net.ssl.SSLEngineResult.HandshakeStatus;
 import javax.net.ssl.SSLEngineResult.Status;
 import javax.net.ssl.SSLSession;
 
-public class NSSLSocketConnection
+public class NSSLSocketConnection implements NIOConnection
 {
-    private Logger logger = Logger.getLogger(NSSLSocketConnection.class.getName());
     
     private SSLEngine       sslEngine;
-    private HandshakeStatus hsStatus;
-    private Status          status;
     
-    private ByteBuffer      localNetData;
-    private ByteBuffer      localAppData;
-    private ByteBuffer      peerNetData;
-    private ByteBuffer      peerAppData;
-    private ByteBuffer      dummy = ByteBuffer.allocate(0);
-
+    private ByteBuffer      readNetBuffer;
+    private ByteBuffer      readAppBuffer;
+    private ByteBuffer      writeNetBuffer;
+    private ByteBuffer      writeAppBuffer;
+    
+    private ByteArrayOutputStream dataBuffer;
+    
     private SocketChannel       channel;
     private Selector            readSelector;
     private Selector            writeSelector;
 
     private InetSocketAddress   hostAddr;
 
+    Object myLock = new Object();
+    
     public NSSLSocketConnection(InetSocketAddress address)
     {
         hostAddr = address;
@@ -52,10 +53,10 @@ public class NSSLSocketConnection
         Selector selector = Selector.open();
         channel.register(selector, SelectionKey.OP_CONNECT);
         
-        long tsNow = System.currentTimeMillis();        
+        long tsNow = System.currentTimeMillis();    
+        System.out.println("Try to connect to host:" + hostAddr.toString());
         channel.connect(hostAddr);
         sslEngine.beginHandshake();
-        hsStatus = sslEngine.getHandshakeStatus();
 
         if (timeout > 0) {
             selector.select(timeout);
@@ -63,11 +64,8 @@ public class NSSLSocketConnection
         else {
             selector.select();
         }
-        if (channel.finishConnect()) {
-            selector.close();
-        }
-        else {
-            selector.close();
+        selector.close();
+        if (! channel.finishConnect()) {
             if (System.currentTimeMillis() - tsNow > timeout) {
                 // time out
                 throw new IOException("Connect to " + hostAddr.toString() + " timeout!");
@@ -76,12 +74,32 @@ public class NSSLSocketConnection
                 throw new IOException("Fail to connect to " + hostAddr.toString() + " !");
             }
         }
-        doHandshake();      
+        
+        writeSelector = Selector.open();
+        channel.register(writeSelector, SelectionKey.OP_WRITE);
+
+        readSelector = Selector.open();
+        channel.register(readSelector, SelectionKey.OP_READ);
+
+        new Thread( new Runnable() {
+            public void run()
+            {
+                try {
+                    processHandshakeStatus();
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+        }).start();
     }
     
     public void close() throws Exception
     {
         if (channel.isConnected()) {
+            synchronized (myLock) {
+                myLock.notifyAll();
+            }
+            
             if (writeSelector != null) {
                 writeSelector.close();
             }
@@ -92,7 +110,332 @@ public class NSSLSocketConnection
         }
     }
     
+    public void write(long timeout, byte[] data, int offset, int len) throws Exception
+    {
+        
+        int remainLen = len;
+        int offsetNow = offset;
+        long tsNow;        
 
+        writeAppBuffer.clear();
+        writeAppBuffer.flip();
+        
+        int capacity = writeAppBuffer.capacity();
+        while (remainLen > 0 || writeAppBuffer.hasRemaining()) {
+            tsNow = System.currentTimeMillis();  
+            if (timeout > 0) {
+                writeSelector.select(timeout);
+                if (System.currentTimeMillis() - tsNow > timeout) {
+                    // time out
+                    throw new IOException("Wait for connection writable timeout!");
+                }
+            }
+            else {
+                writeSelector.select();
+            }
+            
+            Set<SelectionKey> selectedKeys = writeSelector.selectedKeys();
+            Iterator<SelectionKey> keyIterator = selectedKeys.iterator();
+            if (keyIterator.hasNext()) {
+                SelectionKey key = keyIterator.next();
+                if (key.isWritable() ) {
+                    if (! writeAppBuffer.hasRemaining()) {
+                        writeAppBuffer.clear();
+                        if (remainLen > capacity) {
+                            writeAppBuffer.put(data, offsetNow, capacity);
+                            offsetNow += capacity;
+                            remainLen -= capacity;
+                        }
+                        else {
+                            writeAppBuffer.put(data, offsetNow, remainLen);
+                            remainLen = 0; 
+                        }
+                        System.out.println("1 - writeAppBuffer remaining - :" + writeAppBuffer.remaining());
+                        writeAppBuffer.flip();
+                        System.out.println("2 - writeAppBuffer remaining :" + writeAppBuffer.remaining());
+                        synchronized (myLock) {
+                            myLock.notifyAll();
+                        }
+                    }
+                    
+                 }
+            }
+            
+        }
+              
+    }
+    
+    public int read(long timeout, byte[] data, int offset, int len) throws Exception
+    {
+        int totalReadLen = readDataFromBuffer(data, offset, len);
+        int remainLen = len - totalReadLen;
+        int offsetNow = offset + totalReadLen;
+        
+        if (remainLen == 0) {
+            return totalReadLen;
+        }
+                
+        long tsNow;  
+        long remainTimeout = timeout;
+
+        int readLen;
+        while (remainLen > 0) {
+            tsNow = System.currentTimeMillis();  
+            if (timeout > 0) {
+                readSelector.select(remainTimeout);
+                long passedTime = System.currentTimeMillis() - tsNow;
+                if (passedTime > remainTimeout) {
+                    throw new IOException("Read data timeout!");
+                }
+                remainTimeout -= passedTime;
+            }
+            else {
+                readSelector.select();
+            }
+            
+            Set<SelectionKey> selectedKeys = readSelector.selectedKeys();
+            Iterator<SelectionKey> keyIterator = selectedKeys.iterator();
+            if (keyIterator.hasNext()) {
+                SelectionKey key = keyIterator.next();
+                if (key.isReadable() ) {
+                    synchronized (myLock) {
+                        myLock.notifyAll();
+                    }
+                    
+                    readLen = readDataFromBuffer(data, offsetNow, remainLen);
+                    System.out.println("Read len this time -- : " + readLen);
+                    if (readLen > 0) {
+                        remainLen -= readLen;
+                        offsetNow += readLen;
+                        totalReadLen += readLen;
+                    }
+
+                }
+            }
+            
+        }
+        return totalReadLen;
+         
+    }
+
+    /*
+    public int read2(long timeout, byte[] data, int offset, int len) throws Exception
+    {
+        if (readSelector == null) {
+            readSelector = Selector.open();
+            channel.register(readSelector, SelectionKey.OP_READ);
+        }
+        
+        int remainLen = len;
+        int offsetNow = offset;
+        long tsNow;        
+        int totalReadLen = 0;
+
+        if (readAppBuffer.hasRemaining()) {
+            int previousRemainLen = readAppBuffer.remaining();
+            if (previousRemainLen > remainLen) {
+                readAppBuffer.get(data, offsetNow, remainLen);
+                totalReadLen = remainLen;
+                return totalReadLen;
+            }
+            else {
+                readAppBuffer.get(data, offsetNow, previousRemainLen);
+                offsetNow += previousRemainLen;
+                remainLen -= previousRemainLen;
+                totalReadLen += previousRemainLen;
+            }
+
+        }
+
+        int readLen;
+        SSLEngineResult result;
+        while (remainLen > 0) {
+            tsNow = System.currentTimeMillis();  
+            if (timeout > 0) {
+                readSelector.select(timeout);
+                if (System.currentTimeMillis() - tsNow > timeout) {
+                    // time out
+                    throw new IOException("Wait for connection readable timeout!");
+                }
+            }
+            else {
+                readSelector.select();
+            }
+            
+            Set<SelectionKey> selectedKeys = readSelector.selectedKeys();
+            Iterator<SelectionKey> keyIterator = selectedKeys.iterator();
+            if (keyIterator.hasNext()) {
+                SelectionKey key = keyIterator.next();
+                if (key.isReadable() ) {
+                    hsStatus = sslEngine.getHandshakeStatus();
+                    if (hsStatus == HandshakeStatus.NEED_UNWRAP) {
+                        readLen = channel.read(readNetBuffer);
+                        if (readLen < 0) {
+                            System.out.println("no data is read for unwrap. count=" + readLen);
+                            throw new IOException("No data is read for unwrap!");
+                        }
+                        System.out.println("data read: " + readLen);
+                        readNetBuffer.flip();
+                        readAppBuffer.clear();
+                        do {
+                            result = sslEngine.unwrap(readNetBuffer, readAppBuffer);
+                            System.out.println("Unwrapping - :" + result);
+                            // During an handshake re-negotiation we might need to
+                            // perform several unwraps to consume the handshake data.
+                        } while (result.getStatus() == SSLEngineResult.Status.OK
+                                && result.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.NEED_UNWRAP
+                                && result.bytesConsumed() == 0);
+                        if (readAppBuffer.position() == 0 && result.getStatus() == SSLEngineResult.Status.OK
+                                && readNetBuffer.hasRemaining()) {
+                            result = sslEngine.unwrap(readNetBuffer, readAppBuffer);
+                            System.out.println("Unwrapping -- : " + result);
+                        }
+
+                        status = result.getStatus();
+                        assert status != Status.BUFFER_OVERFLOW : "buffer not overflow." + status.toString();
+                        // Prepare the buffer to be written again.
+                        readNetBuffer.clear();
+                        // And the app buffer to be read.
+                        readAppBuffer.flip();
+
+                        readLen = readAppBuffer.remaining();
+                        
+                        if (readLen > 0) {
+                            if (readLen > remainLen) {
+                                readAppBuffer.get(data, offsetNow, remainLen);
+                                totalReadLen = remainLen;
+                                break;
+                            }
+                            else {
+                                readAppBuffer.get(data, offsetNow, readLen);
+                                offsetNow += readLen;
+                                remainLen -= readLen;
+                                totalReadLen += readLen;
+                            }
+                        }
+                        
+                    }
+
+                }
+            }
+            
+        }
+        return totalReadLen;
+         
+    }
+    */
+    
+    private void processHandshakeStatus() throws Exception
+    {        
+        synchronized (myLock) {
+            myLock.wait();
+            HandshakeStatus hsStatus = sslEngine.getHandshakeStatus();
+            while (hsStatus != HandshakeStatus.FINISHED ) {
+                System.out.println("Current HandshakeStatus -- : " + hsStatus);
+                if (hsStatus == HandshakeStatus.NEED_WRAP) {
+                    if (! wrapData()) {
+                        myLock.wait();
+                    }
+                }
+                else if (hsStatus == HandshakeStatus.NEED_UNWRAP) {
+                    if (! unwrapData()) {
+                        myLock.wait();
+                    }
+                }
+                else if (hsStatus == HandshakeStatus.NEED_TASK) {
+                    Runnable runnable;
+                    while ((runnable = sslEngine.getDelegatedTask()) != null) {
+                        runnable.run();
+                    }
+                }
+                else {
+                    System.out.println("Unsupported HandshakeStatus -- : " + hsStatus);
+                    break;
+                }
+                
+                hsStatus = sslEngine.getHandshakeStatus();
+            }
+        }
+    }
+    
+    private boolean wrapData() throws Exception
+    {
+        boolean hasDataToWrap = writeAppBuffer.hasRemaining();
+        if (hasDataToWrap) {
+            writeNetBuffer.clear();
+            SSLEngineResult result;
+            do {
+                result = sslEngine.wrap(writeAppBuffer, writeNetBuffer);
+                System.out.println("Wrapping - :" + result);
+                // During an handshake re-negotiation we might need to
+                // perform several wraps to consume the handshake data.
+                if (result.getStatus() == Status.BUFFER_OVERFLOW) {
+                    throw new IOException("Net buffer overflow!!");
+                }
+                System.out.println("3-   remaining:" + writeAppBuffer.remaining());
+            } while (result.getStatus() == Status.OK
+                    && result.getHandshakeStatus() == HandshakeStatus.NEED_WRAP
+                    && result.bytesProduced() == 0);
+            System.out.println("4 - writeAppBuffer remaining :" + writeAppBuffer.remaining());
+            if (writeNetBuffer.position() == 0 && result.getStatus() == SSLEngineResult.Status.OK
+                    && writeAppBuffer.hasRemaining()) {
+                result = sslEngine.wrap(writeAppBuffer, writeNetBuffer);
+                System.out.println("Wrapping -- : " + result);
+            }
+            System.out.println("5 - writeAppBuffer remaining :" + writeAppBuffer.remaining());
+            writeAppBuffer.clear();
+            writeAppBuffer.flip();
+            
+            if (result.getStatus() == Status.BUFFER_OVERFLOW) {
+                throw new IOException("Output buffer overflow!!");
+            }
+            flushNetBuffer(0); // TODO: timeout value
+        }
+        
+        return hasDataToWrap;
+
+    }
+    
+    private boolean unwrapData() throws Exception
+    {
+        readNetBuffer.clear();
+        int readLen = channel.read(readNetBuffer);
+        if (readLen < 0) {
+            System.out.println("no data is read for upwrap. count=" + readLen);
+            throw new IOException("No data is read for unwrap!");
+        }
+        System.out.println("data read: " + readLen);
+        boolean hasDataToUnwrap = readLen > 0;
+        if (hasDataToUnwrap) {
+            readNetBuffer.flip();
+            readAppBuffer.clear();
+            
+            SSLEngineResult result;
+            do {
+                result = sslEngine.unwrap(readNetBuffer, readAppBuffer);
+                System.out.println("Unwrapping - :" + result);
+                // During an handshake re-negotiation we might need to
+                // perform several unwraps to consume the handshake data.
+            } while (result.getStatus() == SSLEngineResult.Status.OK
+                    && result.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.NEED_UNWRAP
+                    && result.bytesConsumed() == 0);
+            if (readAppBuffer.position() == 0 && result.getStatus() == SSLEngineResult.Status.OK
+                    && readNetBuffer.hasRemaining()) {
+                result = sslEngine.unwrap(readNetBuffer, readAppBuffer);
+                System.out.println("Unwrapping -- : " + result);
+            }
+            readAppBuffer.flip();
+            readLen = readAppBuffer.remaining();
+            System.out.println("Unwrapp result len : " + readLen);
+            byte[] tmp = new byte[readLen];
+            readAppBuffer.get(tmp);
+            dataBuffer.write(tmp);
+            
+            readNetBuffer.clear();
+        }
+        
+        return hasDataToUnwrap;
+    }
     
     private void initSSLEngine() throws Exception
     {
@@ -128,105 +471,72 @@ public class NSSLSocketConnection
         SSLSession session = sslEngine.getSession();
         int appBufMaxSize = session.getApplicationBufferSize();
         int packBufMaxSize = session.getPacketBufferSize();
-        localAppData = ByteBuffer.allocate(appBufMaxSize);
-        localNetData = ByteBuffer.allocate(packBufMaxSize);
-        peerAppData = ByteBuffer.allocate(appBufMaxSize);
-        peerNetData = ByteBuffer.allocate(packBufMaxSize);        
-        peerNetData.clear();
+        readAppBuffer = ByteBuffer.allocate(appBufMaxSize);
+        readNetBuffer = ByteBuffer.allocate(packBufMaxSize);
+        writeAppBuffer = ByteBuffer.allocate(appBufMaxSize);
+        writeNetBuffer = ByteBuffer.allocate(packBufMaxSize);   
+
+        writeAppBuffer.flip();
+        readNetBuffer.flip();
+        
+        dataBuffer = new ByteArrayOutputStream();
    }
+    
+    private void flushNetBuffer(long timeout) throws Exception
+    {        
+        long tsNow;        
 
-    private void handleSocketEvent(SelectionKey key) throws IOException
-    {
-         Selector selector = null;
-        if (key.isConnectable()) {
-            channel = (SocketChannel) key.channel();
-            if (channel.isConnectionPending()) {
-                channel.finishConnect();
+        writeNetBuffer.flip();
+        while (writeNetBuffer.hasRemaining()) {
+            tsNow = System.currentTimeMillis();  
+            if (timeout > 0) {
+                writeSelector.select(timeout);
+                if (System.currentTimeMillis() - tsNow > timeout) {
+                    // time out
+                    throw new IOException("Wait for connection writable timeout!");
+                }
             }
-            doHandshake();
-            channel.register(selector, SelectionKey.OP_READ);
-        }
-        if (key.isReadable()) {
-            channel = (SocketChannel) key.channel();
-            doHandshake();
-            if (hsStatus == HandshakeStatus.FINISHED) {
-                logger.info("Client handshake completes... ...");
-                key.cancel();
-                channel.close();
+            else {
+                writeSelector.select();
             }
+            
+            Set<SelectionKey> selectedKeys = writeSelector.selectedKeys();
+            Iterator<SelectionKey> keyIterator = selectedKeys.iterator();
+            if (keyIterator.hasNext()) {
+                SelectionKey key = keyIterator.next();
+                if (key.isWritable() ) {
+                    System.out.println("Before output - writeNetBuffer.remaining()=" + writeNetBuffer.remaining());
+                    channel.write(writeNetBuffer);
+                    System.out.println("After output - : writeNetBuffer.remaining()=" + writeNetBuffer.remaining());
+
+                }
+            }
+            
         }
+              
     }
-
-    private void doHandshake() throws IOException
+    
+    private int readDataFromBuffer(byte[] data, int offset, int len)
     {
-        SSLEngineResult result;
-        int count = 0;
-        while (hsStatus != HandshakeStatus.FINISHED) {
-            logger.info("handshake status: " + hsStatus);
-            switch (hsStatus) {
-            case NEED_TASK:
-                Runnable runnable;
-                while ((runnable = sslEngine.getDelegatedTask()) != null) {
-                    runnable.run();
-                }
-                hsStatus = sslEngine.getHandshakeStatus();
-                break;
-            case NEED_UNWRAP:
-                count = channel.read(peerNetData);
-                if (count < 0) {
-                    logger.info("no data is read for unwrap.");
-                    break;
-                } else {
-                    logger.info("data read: " + count);
-                }
-                peerNetData.flip();
-                peerAppData.clear();
-                do {
-                    result = sslEngine.unwrap(peerNetData, peerAppData);
-                    logger.info("Unwrapping:\n" + result);
-                    // During an handshake renegotiation we might need to
-                    // perform
-                    // several unwraps to consume the handshake data.
-                } while (result.getStatus() == SSLEngineResult.Status.OK
-                        && result.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.NEED_UNWRAP
-                        && result.bytesProduced() == 0);
-                if (peerAppData.position() == 0 && result.getStatus() == SSLEngineResult.Status.OK
-                        && peerNetData.hasRemaining()) {
-                    result = sslEngine.unwrap(peerNetData, peerAppData);
-                    logger.info("Unwrapping:\n" + result);
-                }
-                hsStatus = result.getHandshakeStatus();
-                status = result.getStatus();
-                assert status != status.BUFFER_OVERFLOW : "buffer not overflow." + status.toString();
-                // Prepare the buffer to be written again.
-                peerNetData.compact();
-                // And the app buffer to be read.
-                peerAppData.flip();
-                break;
-            case NEED_WRAP:
-                localNetData.clear();
-                result = sslEngine.wrap(dummy, localNetData);
-                hsStatus = result.getHandshakeStatus();
-                status = result.getStatus();
-                while (status != Status.OK) {
-                    logger.info("status: " + status);
-                    switch (status) {
-                    case BUFFER_OVERFLOW:
-                        break;
-                    case BUFFER_UNDERFLOW:
-                        break;
-                    }
-                }
-                localNetData.flip();
-                count = channel.write(localNetData);
-                if (count <= 0) {
-                    logger.info("No data is written.");
-                } else {
-                    logger.info("Written data: " + count);
-                }
-                break;
+        int totalReadLen = 0;
+
+        if (dataBuffer.size() > 0) {
+            byte[] buf = dataBuffer.toByteArray();
+            int availableLen = buf.length;
+            if (availableLen > len) {
+                System.arraycopy(buf, 0, data, offset, len);
+                dataBuffer.reset();
+                dataBuffer.write(buf, len, buf.length - len);
+                totalReadLen = len;
+            }
+            else {
+                System.arraycopy(buf, 0, data, offset, availableLen);
+                dataBuffer.reset();
+                totalReadLen = availableLen;
             }
         }
+        
+        return totalReadLen;
     }
     
 }
