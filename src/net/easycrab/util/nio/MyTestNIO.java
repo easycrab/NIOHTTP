@@ -1,5 +1,6 @@
 package net.easycrab.util.nio;
 
+import java.io.ByteArrayOutputStream;
 import java.util.Calendar;
 
 public class MyTestNIO
@@ -52,7 +53,8 @@ public class MyTestNIO
     
     public static void main(String[] args) {
 //        NHttpConnection conn = new NHttpConnection("http://101.231.126.26/share/tmp/bazi.apk", false, 5000);
-        NHttpsConnection conn = new NHttpsConnection("vip.163.com", false, 5000);
+//        NHttpsConnection conn = new NHttpsConnection("vip.163.com", false, 5000);
+        NHttpsConnection conn = new NHttpsConnection("www.wormly.com", false, 5000);
         
         try {
             System.out.println(getTimestamp() + " Ready to connect to server now...");
@@ -60,6 +62,7 @@ public class MyTestNIO
 //            System.out.println(getTimestamp() + " Connect Done! Sleep 1 seconds ...");
 //            Thread.sleep(1000);
 //            System.out.println(getTimestamp() + " Wake up! Try to close the connection ...");
+//          /*
             System.out.println(getTimestamp() + " Try to get the statusCode ...");
             int code = conn.getResponseStatusCode();
             String statusText = conn.getResponseStatusText();
@@ -68,7 +71,17 @@ public class MyTestNIO
             int contentLen = conn.getContentLength();
             System.out.println(getTimestamp() + " ContentLength = " + contentLen);
             
-            if (contentLen > 0) {
+            if (conn.isChunked()) {
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                conn.readAllChunk(baos);
+                System.out.println(getTimestamp() + " Total Chunk Size = " + baos.size());
+                
+                String content = new String(baos.toByteArray(), "utf-8");
+                System.out.println(content);
+
+            
+            }
+            else if (contentLen > 0) {
                 int targetGetLen = (contentLen > 1024) ? 1024 : contentLen;
                 byte[] body = new byte[targetGetLen];
                 System.out.println(getTimestamp() + " Try to receive connection body ...");
@@ -79,7 +92,7 @@ public class MyTestNIO
                 System.out.println(content);
 
             }
-
+//          */
             System.out.println(getTimestamp() + " Try to close the connection ...");
             conn.close();
             System.out.println(getTimestamp() + " Connection closed!");

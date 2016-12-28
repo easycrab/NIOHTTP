@@ -1,6 +1,5 @@
 package net.easycrab.util.nio;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -21,21 +20,20 @@ public class NSSLSocketConnection implements NIOConnection
 {
     
     private SSLEngine       sslEngine;
+    private boolean         handshakeDone;
     
     private ByteBuffer      readNetBuffer;
     private ByteBuffer      readAppBuffer;
     private ByteBuffer      writeNetBuffer;
     private ByteBuffer      writeAppBuffer;
-    
-    private ByteArrayOutputStream dataBuffer;
-    
+    private ByteBuffer      dummyBuffer = ByteBuffer.allocate(0);
+        
     private SocketChannel       channel;
     private Selector            readSelector;
     private Selector            writeSelector;
 
     private InetSocketAddress   hostAddr;
-
-    Object myLock = new Object();
+    private long                defaultTimeout;
     
     public NSSLSocketConnection(InetSocketAddress address)
     {
@@ -44,6 +42,8 @@ public class NSSLSocketConnection implements NIOConnection
 
     public void connect(long timeout) throws Exception
     {
+        defaultTimeout = timeout;
+        
         initSSLEngine();
         initByteBuffer();
         
@@ -56,7 +56,6 @@ public class NSSLSocketConnection implements NIOConnection
         long tsNow = System.currentTimeMillis();    
         System.out.println("Try to connect to host:" + hostAddr.toString());
         channel.connect(hostAddr);
-        sslEngine.beginHandshake();
 
         if (timeout > 0) {
             selector.select(timeout);
@@ -75,37 +74,27 @@ public class NSSLSocketConnection implements NIOConnection
             }
         }
         
-        writeSelector = Selector.open();
-        channel.register(writeSelector, SelectionKey.OP_WRITE);
-
-        readSelector = Selector.open();
-        channel.register(readSelector, SelectionKey.OP_READ);
-
-        new Thread( new Runnable() {
-            public void run()
-            {
-                try {
-                    processHandshakeStatus();
-                } catch (Exception e) {
-                    e.printStackTrace();
-                }
-            }
-        }).start();
+        
+        System.out.println("----** Begin Handshake Now ... **----");
+        handshakeDone = false;
+        sslEngine.beginHandshake();
+        processHandshake();
+        System.out.println("----** Handshake Completed! **----");
     }
     
     public void close() throws Exception
     {
         if (channel.isConnected()) {
-            synchronized (myLock) {
-                myLock.notifyAll();
-            }
-            
+            System.out.println("----** close R/W Selector **----");
             if (writeSelector != null) {
                 writeSelector.close();
+                writeSelector = null;
             }
             if (readSelector != null) {
                 readSelector.close();
+                readSelector = null;
             }
+            System.out.println("----** close SSL Socket Channel **----");
             channel.close();
         }
     }
@@ -115,102 +104,102 @@ public class NSSLSocketConnection implements NIOConnection
         
         int remainLen = len;
         int offsetNow = offset;
-        long tsNow;        
-
-        writeAppBuffer.clear();
-        writeAppBuffer.flip();
         
         int capacity = writeAppBuffer.capacity();
-        while (remainLen > 0 || writeAppBuffer.hasRemaining()) {
-            tsNow = System.currentTimeMillis();  
+        long tsStart = System.currentTimeMillis();  
+        long remainTimeout = timeout;
+        boolean remainDataInBuf = false;
+        writeAppBuffer.clear();
+        while (remainLen > 0 || remainDataInBuf) {
             if (timeout > 0) {
-                writeSelector.select(timeout);
-                if (System.currentTimeMillis() - tsNow > timeout) {
-                    // time out
-                    throw new IOException("Wait for connection writable timeout!");
+                long passTime = System.currentTimeMillis() - tsStart;
+                if (passTime < timeout) {
+                    remainTimeout = timeout - passTime;
+                }
+                else {
+                    throw new IOException("Write data to outbound timeout!");
                 }
             }
-            else {
-                writeSelector.select();
+            
+            if (! remainDataInBuf) {
+                writeAppBuffer.clear();
+                if (remainLen > capacity) {
+                    writeAppBuffer.put(data, offsetNow, capacity);
+                    offsetNow += capacity;
+                    remainLen -= capacity;
+                }
+                else {
+                    writeAppBuffer.put(data, offsetNow, remainLen);
+                    remainLen = 0; 
+                }
+                writeAppBuffer.flip();
+                System.out.println("writeAppBuffer remaining :" + writeAppBuffer.remaining());
             }
             
-            Set<SelectionKey> selectedKeys = writeSelector.selectedKeys();
-            Iterator<SelectionKey> keyIterator = selectedKeys.iterator();
-            if (keyIterator.hasNext()) {
-                SelectionKey key = keyIterator.next();
-                if (key.isWritable() ) {
-                    if (! writeAppBuffer.hasRemaining()) {
-                        writeAppBuffer.clear();
-                        if (remainLen > capacity) {
-                            writeAppBuffer.put(data, offsetNow, capacity);
-                            offsetNow += capacity;
-                            remainLen -= capacity;
-                        }
-                        else {
-                            writeAppBuffer.put(data, offsetNow, remainLen);
-                            remainLen = 0; 
-                        }
-                        System.out.println("1 - writeAppBuffer remaining - :" + writeAppBuffer.remaining());
-                        writeAppBuffer.flip();
-                        System.out.println("2 - writeAppBuffer remaining :" + writeAppBuffer.remaining());
-                        synchronized (myLock) {
-                            myLock.notifyAll();
-                        }
-                    }
-                    
-                 }
+            writeNetBuffer.clear();
+            SSLEngineResult result;
+            result = sslEngine.wrap(writeAppBuffer, writeNetBuffer);
+            System.out.println("---> Wrapping for Outbound - :" + result);
+
+            if (writeNetBuffer.position() > 0) {
+                flushNetBuffer(remainTimeout);
             }
-            
+
+            remainDataInBuf = writeAppBuffer.hasRemaining();
         }
               
     }
     
     public int read(long timeout, byte[] data, int offset, int len) throws Exception
     {
-        int totalReadLen = readDataFromBuffer(data, offset, len);
-        int remainLen = len - totalReadLen;
-        int offsetNow = offset + totalReadLen;
-        
-        if (remainLen == 0) {
-            return totalReadLen;
+        int remainLen = len;
+        int offsetNow = offset;
+        int totalReadLen = 0;
+
+        if (readAppBuffer.hasRemaining()) {
+            int previousRemainLen = readAppBuffer.remaining();
+            if (previousRemainLen > remainLen) {
+                readAppBuffer.get(data, offsetNow, remainLen);
+                totalReadLen = remainLen;
+                return totalReadLen;
+            }
+            else {
+                readAppBuffer.get(data, offsetNow, previousRemainLen);
+                offsetNow += previousRemainLen;
+                remainLen -= previousRemainLen;
+                totalReadLen += previousRemainLen;
+            }
+
         }
-                
-        long tsNow;  
+
+        long tsStart = System.currentTimeMillis();  
         long remainTimeout = timeout;
 
         int readLen;
         while (remainLen > 0) {
-            tsNow = System.currentTimeMillis();  
             if (timeout > 0) {
-                readSelector.select(remainTimeout);
-                long passedTime = System.currentTimeMillis() - tsNow;
-                if (passedTime > remainTimeout) {
-                    throw new IOException("Read data timeout!");
+                long passTime = System.currentTimeMillis() - tsStart;
+                if (passTime < timeout) {
+                    remainTimeout = timeout - passTime;
                 }
-                remainTimeout -= passedTime;
+                else {
+                    throw new IOException("Read data from Inbound timeout!");
+                }
+            }
+            waitForReadable(remainTimeout);
+            
+            unwrapInboundData(remainTimeout);
+            readLen = readAppBuffer.remaining();
+            if (readLen > remainLen) {
+                readAppBuffer.get(data, offsetNow, remainLen);
+                totalReadLen = remainLen;
+                break;
             }
             else {
-                readSelector.select();
-            }
-            
-            Set<SelectionKey> selectedKeys = readSelector.selectedKeys();
-            Iterator<SelectionKey> keyIterator = selectedKeys.iterator();
-            if (keyIterator.hasNext()) {
-                SelectionKey key = keyIterator.next();
-                if (key.isReadable() ) {
-                    synchronized (myLock) {
-                        myLock.notifyAll();
-                    }
-                    
-                    readLen = readDataFromBuffer(data, offsetNow, remainLen);
-                    System.out.println("Read len this time -- : " + readLen);
-                    if (readLen > 0) {
-                        remainLen -= readLen;
-                        offsetNow += readLen;
-                        totalReadLen += readLen;
-                    }
-
-                }
+                readAppBuffer.get(data, offsetNow, readLen);
+                offsetNow += readLen;
+                remainLen -= readLen;
+                totalReadLen += readLen;
             }
             
         }
@@ -325,116 +314,250 @@ public class NSSLSocketConnection implements NIOConnection
     }
     */
     
-    private void processHandshakeStatus() throws Exception
+    private void processHandshake() throws Exception
     {        
-        synchronized (myLock) {
-            myLock.wait();
-            HandshakeStatus hsStatus = sslEngine.getHandshakeStatus();
-            while (hsStatus != HandshakeStatus.FINISHED ) {
-                System.out.println("Current HandshakeStatus -- : " + hsStatus);
-                if (hsStatus == HandshakeStatus.NEED_WRAP) {
-                    if (! wrapData()) {
-                        myLock.wait();
-                    }
-                }
-                else if (hsStatus == HandshakeStatus.NEED_UNWRAP) {
-                    if (! unwrapData()) {
-                        myLock.wait();
-                    }
-                }
-                else if (hsStatus == HandshakeStatus.NEED_TASK) {
-                    Runnable runnable;
-                    while ((runnable = sslEngine.getDelegatedTask()) != null) {
-                        runnable.run();
-                    }
-                }
-                else {
-                    System.out.println("Unsupported HandshakeStatus -- : " + hsStatus);
-                    break;
-                }
-                
-                hsStatus = sslEngine.getHandshakeStatus();
+        HandshakeStatus hsStatus;
+        while (! handshakeDone) {
+            hsStatus = sslEngine.getHandshakeStatus();
+            System.out.println("Current HandshakeStatus -- : " + hsStatus);
+            if (hsStatus == HandshakeStatus.NEED_WRAP) {
+                wrapHandshakeData();
             }
+            else if (hsStatus == HandshakeStatus.NEED_UNWRAP) {
+                unwrapHandshakeData();
+            }
+            else if (hsStatus == HandshakeStatus.NEED_TASK) {
+                Runnable runnable;
+                while ((runnable = sslEngine.getDelegatedTask()) != null) {
+                    System.out.println("**** Debug Place **** SSLEngine Delegated Task");
+                    runnable.run();
+                }
+            }
+            else { 
+                // It's NOT_HANDSHAKING
+                System.out.println("Unexpected HandshakeStatus -- : " + hsStatus);
+                break;
+            }
+            
         }
     }
     
-    private boolean wrapData() throws Exception
+    private void wrapHandshakeData() throws Exception
     {
-        boolean hasDataToWrap = writeAppBuffer.hasRemaining();
-        if (hasDataToWrap) {
-            writeNetBuffer.clear();
-            SSLEngineResult result;
-            do {
-                result = sslEngine.wrap(writeAppBuffer, writeNetBuffer);
-                System.out.println("Wrapping - :" + result);
-                // During an handshake re-negotiation we might need to
-                // perform several wraps to consume the handshake data.
-                if (result.getStatus() == Status.BUFFER_OVERFLOW) {
-                    throw new IOException("Net buffer overflow!!");
-                }
-                System.out.println("3-   remaining:" + writeAppBuffer.remaining());
-            } while (result.getStatus() == Status.OK
-                    && result.getHandshakeStatus() == HandshakeStatus.NEED_WRAP
-                    && result.bytesProduced() == 0);
-            System.out.println("4 - writeAppBuffer remaining :" + writeAppBuffer.remaining());
-            if (writeNetBuffer.position() == 0 && result.getStatus() == SSLEngineResult.Status.OK
-                    && writeAppBuffer.hasRemaining()) {
-                result = sslEngine.wrap(writeAppBuffer, writeNetBuffer);
-                System.out.println("Wrapping -- : " + result);
+        SSLEngineResult result;
+        writeNetBuffer.clear();
+
+        result = sslEngine.wrap(dummyBuffer, writeNetBuffer);
+        Status          status = result.getStatus();
+        System.out.println("wrapHandshakeData() status: " + status);        
+        if (status != Status.OK) {
+            switch (status) {
+            case BUFFER_OVERFLOW:
+                System.out.println("wrap to outbound (BUFFER_OVERFLOW)");
+                throw new IOException("Handshake: wrap to outbound (BUFFER_OVERFLOW)");
+            case BUFFER_UNDERFLOW:
+                System.out.println("wrap to outbound (BUFFER_UNDERFLOW)");
+                throw new IOException("Handshake: wrap to outbound (BUFFER_UNDERFLOW)");
+            default:
+                // do nothing;
             }
-            System.out.println("5 - writeAppBuffer remaining :" + writeAppBuffer.remaining());
-            writeAppBuffer.clear();
-            writeAppBuffer.flip();
-            
-            if (result.getStatus() == Status.BUFFER_OVERFLOW) {
-                throw new IOException("Output buffer overflow!!");
-            }
-            flushNetBuffer(0); // TODO: timeout value
         }
         
-        return hasDataToWrap;
+        flushNetBuffer(defaultTimeout); 
 
     }
     
-    private boolean unwrapData() throws Exception
+    private void unwrapHandshakeData() throws Exception
     {
-        readNetBuffer.clear();
-        int readLen = channel.read(readNetBuffer);
-        if (readLen < 0) {
-            System.out.println("no data is read for upwrap. count=" + readLen);
-            throw new IOException("No data is read for unwrap!");
-        }
-        System.out.println("data read: " + readLen);
-        boolean hasDataToUnwrap = readLen > 0;
-        if (hasDataToUnwrap) {
+        boolean unwrapDone = false;
+        boolean previousUnderflow = false;
+        SSLEngineResult result;
+
+        while (! unwrapDone) {
+            
+            if (previousUnderflow || readNetBuffer.position() == 0) {
+                waitForReadable(defaultTimeout);
+                
+                int readLen = channel.read(readNetBuffer);
+                System.out.println("Handshake: Inbound data read for upwrap. read Len:" + readLen);
+                if (readLen < 0) {
+                    throw new IOException("Handshake: No data is read for unwrap!");
+                }
+                
+                if (previousUnderflow) {
+                    previousUnderflow = false;
+                }
+                
+            }
             readNetBuffer.flip();
             readAppBuffer.clear();
-            
-            SSLEngineResult result;
+
             do {
                 result = sslEngine.unwrap(readNetBuffer, readAppBuffer);
                 System.out.println("Unwrapping - :" + result);
                 // During an handshake re-negotiation we might need to
                 // perform several unwraps to consume the handshake data.
             } while (result.getStatus() == SSLEngineResult.Status.OK
-                    && result.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.NEED_UNWRAP
-                    && result.bytesConsumed() == 0);
-            if (readAppBuffer.position() == 0 && result.getStatus() == SSLEngineResult.Status.OK
+                    && result.getHandshakeStatus() == HandshakeStatus.NEED_UNWRAP
+                    && result.bytesProduced() == 0);
+            
+            if (result.getHandshakeStatus() == HandshakeStatus.FINISHED) {
+                handshakeDone = true;
+            }
+            
+            if (readAppBuffer.position() == 0 && result.getStatus() == Status.OK
                     && readNetBuffer.hasRemaining()) {
                 result = sslEngine.unwrap(readNetBuffer, readAppBuffer);
-                System.out.println("Unwrapping -- : " + result);
+                System.out.println("Unwrapping -* : " + result);
+                if (result.getHandshakeStatus() == HandshakeStatus.FINISHED) {
+                    handshakeDone = true;
+                }
             }
-            readAppBuffer.flip();
-            readLen = readAppBuffer.remaining();
-            System.out.println("Unwrapp result len : " + readLen);
-            byte[] tmp = new byte[readLen];
-            readAppBuffer.get(tmp);
-            dataBuffer.write(tmp);
-            
-            readNetBuffer.clear();
+
+            Status status = result.getStatus();
+            if (status != Status.OK) {
+                switch (status) {
+                case BUFFER_OVERFLOW:
+                    System.out.println("unwrap from inbound (BUFFER_OVERFLOW)");
+//                    throw new IOException("Handshake: unwrap from inbound (BUFFER_OVERFLOW)");
+                case BUFFER_UNDERFLOW:
+                    System.out.println("unwrap from inbound (BUFFER_UNDERFLOW)");
+                    readNetBuffer.compact();
+                    previousUnderflow = true;
+//                    throw new IOException("Handshake: unwrap from inbound (BUFFER_UNDERFLOW)");
+                default:
+                    // do nothing;
+                }
+            }
+            else { 
+                unwrapDone = true;
+                readNetBuffer.compact();
+
+            }
+       }
+
+    }
+    
+    private void waitForReadable(long timeout) throws Exception
+    {
+        if (readSelector == null) {
+            readSelector = Selector.open();
+            channel.register(readSelector, SelectionKey.OP_READ);
         }
         
-        return hasDataToUnwrap;
+        long tsNow;  
+        long remainTimeout = timeout;
+        boolean needWait4Readable = true;
+        while (needWait4Readable && readSelector != null && readSelector.isOpen()) {
+            if (timeout > 0) {
+                tsNow = System.currentTimeMillis();  
+                readSelector.select(timeout);
+                long passedTime = System.currentTimeMillis() - tsNow;
+                if (passedTime > remainTimeout) {
+                    throw new IOException("Wait for socket channel READable timeout!");
+                }
+                remainTimeout -= passedTime;
+            }
+            else {
+                readSelector.select();
+            }
+            
+            Set<SelectionKey> selectedKeys = readSelector.selectedKeys();
+            Iterator<SelectionKey> keyIterator = selectedKeys.iterator();
+            if (keyIterator.hasNext()) {
+                SelectionKey key = keyIterator.next();
+                if (key.isReadable() ) {
+                    needWait4Readable = false;
+                }
+            }
+        }
+    }
+
+    private void waitForWritable(long timeout) throws Exception
+    {
+        if (writeSelector == null) {
+            writeSelector = Selector.open();
+            channel.register(writeSelector, SelectionKey.OP_WRITE);
+
+        }
+        
+        long tsNow;  
+        long remainTimeout = timeout;
+        boolean needWait4Writable = true;
+        while (needWait4Writable && writeSelector != null && writeSelector.isOpen()) {
+            if (timeout > 0) {
+                tsNow = System.currentTimeMillis();  
+                writeSelector.select(timeout);
+                long passedTime = System.currentTimeMillis() - tsNow;
+                if (passedTime > remainTimeout) {
+                    throw new IOException("Wait for socket channel WRITable timeout!");
+                }
+                remainTimeout -= passedTime;
+            }
+            else {
+                writeSelector.select();
+            }
+            
+            Set<SelectionKey> selectedKeys = writeSelector.selectedKeys();
+            Iterator<SelectionKey> keyIterator = selectedKeys.iterator();
+            if (keyIterator.hasNext()) {
+                SelectionKey key = keyIterator.next();
+                if (key.isWritable() ) {
+                    needWait4Writable = false;
+                }
+            }
+        }
+    }
+
+    private void unwrapInboundData(long timeout) throws Exception
+    {
+        readNetBuffer.clear();
+        readAppBuffer.clear();
+
+        long tsStart = System.currentTimeMillis();  
+        long remainTimeout = timeout;
+
+        int readLen = 0;
+        boolean needReadMore = true;
+        while (needReadMore) {
+            if (timeout > 0) {
+                long passTime = System.currentTimeMillis() - tsStart;
+                if (passTime < timeout) {
+                    remainTimeout = timeout - passTime;
+                }
+                else {
+                    throw new IOException("Read data from Inbound timeout!");
+                }
+            }
+            waitForReadable(remainTimeout);
+
+            readLen = channel.read(readNetBuffer);
+            if (readLen < 0) {
+                System.out.println("no data is read for upwrap. count=" + readLen);
+                throw new IOException("No data is read for unwrap!");
+            }
+            System.out.println("data read: " + readLen);
+            if (readLen > 0) {
+                readNetBuffer.flip();
+                
+                SSLEngineResult result;
+                result = sslEngine.unwrap(readNetBuffer, readAppBuffer);
+                System.out.println("Unwrapping from Inbound- :" + result 
+                        + " readAppBuffer.position(): " + readAppBuffer.position());
+                if (result.getStatus() == Status.BUFFER_UNDERFLOW) {
+                    needReadMore = true;
+                    readNetBuffer.compact();
+                }
+                else {
+                    needReadMore = false;
+                }
+                
+            }
+            
+        }
+        readAppBuffer.flip();
+        readLen = readAppBuffer.remaining();
+        System.out.println("Unwrapp result len : " + readLen);        
     }
     
     private void initSSLEngine() throws Exception
@@ -475,68 +598,32 @@ public class NSSLSocketConnection implements NIOConnection
         readNetBuffer = ByteBuffer.allocate(packBufMaxSize);
         writeAppBuffer = ByteBuffer.allocate(appBufMaxSize);
         writeNetBuffer = ByteBuffer.allocate(packBufMaxSize);   
-
-        writeAppBuffer.flip();
-        readNetBuffer.flip();
-        
-        dataBuffer = new ByteArrayOutputStream();
    }
     
     private void flushNetBuffer(long timeout) throws Exception
     {        
-        long tsNow;        
-
         writeNetBuffer.flip();
+        long tsNow;
+        long remainTimeout = timeout;
+        int sendLen;
         while (writeNetBuffer.hasRemaining()) {
-            tsNow = System.currentTimeMillis();  
-            if (timeout > 0) {
-                writeSelector.select(timeout);
-                if (System.currentTimeMillis() - tsNow > timeout) {
-                    // time out
-                    throw new IOException("Wait for connection writable timeout!");
+            tsNow = System.currentTimeMillis();
+            waitForWritable(remainTimeout);
+            System.out.println("Before output - writeNetBuffer.remaining()=" + writeNetBuffer.remaining());
+            sendLen = channel.write(writeNetBuffer);
+            System.out.println("After output - : writeNetBuffer.remaining()=" + writeNetBuffer.remaining() 
+            + " sendLength=" + sendLen);
+            if (writeNetBuffer.hasRemaining()) {
+                if (timeout > 0) {
+                    long passTime = System.currentTimeMillis() - tsNow;
+                    if (passTime >= remainTimeout) {
+                        throw new IOException("Flush Outbound Data timeout!");
+                    }
+                    remainTimeout -= passTime;
                 }
             }
-            else {
-                writeSelector.select();
-            }
-            
-            Set<SelectionKey> selectedKeys = writeSelector.selectedKeys();
-            Iterator<SelectionKey> keyIterator = selectedKeys.iterator();
-            if (keyIterator.hasNext()) {
-                SelectionKey key = keyIterator.next();
-                if (key.isWritable() ) {
-                    System.out.println("Before output - writeNetBuffer.remaining()=" + writeNetBuffer.remaining());
-                    channel.write(writeNetBuffer);
-                    System.out.println("After output - : writeNetBuffer.remaining()=" + writeNetBuffer.remaining());
-
-                }
-            }
-            
         }
               
     }
-    
-    private int readDataFromBuffer(byte[] data, int offset, int len)
-    {
-        int totalReadLen = 0;
-
-        if (dataBuffer.size() > 0) {
-            byte[] buf = dataBuffer.toByteArray();
-            int availableLen = buf.length;
-            if (availableLen > len) {
-                System.arraycopy(buf, 0, data, offset, len);
-                dataBuffer.reset();
-                dataBuffer.write(buf, len, buf.length - len);
-                totalReadLen = len;
-            }
-            else {
-                System.arraycopy(buf, 0, data, offset, availableLen);
-                dataBuffer.reset();
-                totalReadLen = availableLen;
-            }
-        }
         
-        return totalReadLen;
-    }
-    
 }

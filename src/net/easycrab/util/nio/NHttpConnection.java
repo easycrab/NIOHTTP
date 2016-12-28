@@ -10,6 +10,8 @@ import java.util.Map.Entry;
 public class NHttpConnection 
 {
     protected final String              HTTP_PROTOCOL = "HTTP/1.1";
+    protected final int                 TMP_BUFFER_SIZE = 2048; // 2K
+    
     protected String                    url;
     protected boolean                   isPost;
     protected long                      timeout;
@@ -28,6 +30,7 @@ public class NHttpConnection
     protected boolean                   isConnected;
     protected boolean                   hasReqHeaderSent;
     protected boolean                   hasRespHeaderGot;
+    protected boolean                   isChunkedResponse;
     
     protected String                    acceptedProtocol = "http";
     protected int                       defaultPortNum = 80;
@@ -40,6 +43,7 @@ public class NHttpConnection
         requestHeaders = new HashMap<String, String>();
         responseHeaders = new HashMap<String, String>();
         isConnected = false;
+        isChunkedResponse = false;
     }
     
     public void prepareRequestHeader(String headerName, String headerVal)
@@ -89,6 +93,11 @@ public class NHttpConnection
         return len;
     }
     
+    public boolean isChunked()
+    {
+        return isChunkedResponse;
+    }
+    
     public void connect() throws Exception
     {
         parseRequestUrl();
@@ -132,6 +141,93 @@ public class NHttpConnection
         ensureHeaderRead();
         
         connection.read(timeout, data, offset, len);        
+    }
+    
+    public void readAllChunk(ByteArrayOutputStream baos) throws Exception
+    {
+        ensureHeaderRead();
+        
+        if (! isChunkedResponse) {
+            throw new IOException("Response is not Chunk!");
+        }
+
+        long totalLength = 0;
+        int chunkSize;
+//        String chunkExt;
+        
+        String hexText;
+        int place;
+        
+        byte[] buffer = new byte[TMP_BUFFER_SIZE]; // read 2K every time
+        
+        boolean needReadMore = true;
+        boolean lastChunkFound = false;
+        
+        String lineText;
+        while (needReadMore) {
+            lineText = readOneLine();
+            if (lineText == null) {
+                // empty line
+                if (lastChunkFound) {
+                    needReadMore = false;
+                }
+                else {
+                    throw new IOException("Unexpected empty line in chunk body!");
+                }
+            }
+            else if (lastChunkFound) {
+                // skip tailer header
+            }
+            else {
+                // It's a chunk
+                place = lineText.indexOf(';');
+                if (place > 0) {
+                    hexText = lineText.substring(0, place);
+//                    if (place + 1 < lineText.length()) {
+//                        // it has chunk extension
+//                        chunkExt = lineText.substring(place + 1);
+//                    }
+                }
+                else {
+                    hexText = lineText;
+                }
+                try {
+                    chunkSize = Integer.parseInt(hexText, 16);
+                } catch (Exception e) {
+                    throw new IOException("Unaccepted chunk size line!" + lineText);
+                }
+                
+                if (chunkSize == 0) {
+                    // it's last chunk
+                    System.out.println("Chunk size is 0, last chunk found!");
+                    lastChunkFound = true;
+                }
+                else {
+                    int remainLen = chunkSize;
+                    while (remainLen > 0) {
+                        if (remainLen > TMP_BUFFER_SIZE)
+                        {
+                            readData(buffer, 0, TMP_BUFFER_SIZE);
+                            baos.write(buffer, 0, TMP_BUFFER_SIZE);
+                            remainLen -= TMP_BUFFER_SIZE;
+                            totalLength += totalLength;
+                        }
+                        else {
+                            readData(buffer, 0, remainLen);
+                            baos.write(buffer, 0, remainLen);
+                            remainLen = 0;
+                            totalLength += remainLen;
+                        }
+                    }
+                    lineText = readOneLine();
+                    if (lineText != null) {
+                        throw new IOException("The Terminate CRLF expected for end of chunk body!" + lineText);
+                    }
+                }
+            }            
+            
+        }
+        
     }
     
     protected void ensureHeaderRead() throws Exception
@@ -337,11 +433,56 @@ public class NHttpConnection
                 key = line.substring(0, place1).trim();
                 value = line.substring(place1 + 1).trim();
                 responseHeaders.put(key, value);
+                // isChunkedResponse
             }
             else {
                 throw new IOException("Error, Invalid Line in Response Header [" + line + "]");
             }
         }
+        
+        // check whether the response is chunk sending
+        value = responseHeaders.get("Transfer-Encoding");
+        if (value != null && "chunked".equalsIgnoreCase(value)) {
+            isChunkedResponse = true;
+        }
+    }
+    
+    protected String readOneLine() throws Exception
+    {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        byte[] buffer = new byte[32];
+        
+        byte bNow;        
+        boolean isPreviousCr = false;
+        boolean isCrLfFound  = false;
+        while (! isCrLfFound) {
+            connection.read(timeout, buffer, 0, 1); // read one byte every time
+            bNow = buffer[0];
+            
+            if (isPreviousCr) {
+                if (bNow == '\n') {
+                    isCrLfFound = true;
+                }
+                else {
+                    isPreviousCr = false;
+                }
+            }
+            else {
+                if (bNow == '\r') {
+                    isPreviousCr = true;
+                }
+                else {
+                    baos.write(bNow);
+                }
+            }
+        }
+        
+        String lineText = null;
+        if (baos.size() > 0) {
+            lineText = new String(baos.toByteArray(), "utf-8");
+        }
+        
+        return lineText;
     }
     
     

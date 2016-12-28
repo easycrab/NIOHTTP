@@ -84,18 +84,21 @@ public class NSocketConnection implements NIOConnection
         
         int remainLen = len;
         int offsetNow = offset;
-        long tsNow;        
+        long tsNow;  
+        long remainTimeout = timeout;
 
         writeBuf.clear();
         writeBuf.flip();
         while (remainLen > 0 || writeBuf.hasRemaining()) {
             tsNow = System.currentTimeMillis();  
             if (timeout > 0) {
-                writeSelector.select(timeout);
-                if (System.currentTimeMillis() - tsNow > timeout) {
+                writeSelector.select(remainTimeout);
+                long passTime = System.currentTimeMillis() - tsNow;
+                if (passTime >= remainTimeout) {
                     // time out
                     throw new IOException("Wait for connection writable timeout!");
                 }
+                remainTimeout -= passTime;
             }
             else {
                 writeSelector.select();
@@ -138,6 +141,7 @@ public class NSocketConnection implements NIOConnection
         int remainLen = len;
         int offsetNow = offset;
         long tsNow;        
+        long remainTimeout = timeout;
         int totalReadLen = 0;
 
         if (readBuf.hasRemaining()) {
@@ -159,11 +163,13 @@ public class NSocketConnection implements NIOConnection
         while (remainLen > 0) {
             tsNow = System.currentTimeMillis();  
             if (timeout > 0) {
-                readSelector.select(timeout);
-                if (System.currentTimeMillis() - tsNow > timeout) {
+                readSelector.select(remainTimeout);
+                long passTime = System.currentTimeMillis() - tsNow;
+                if (passTime >= remainTimeout) {
                     // time out
                     throw new IOException("Wait for connection readable timeout!");
                 }
+                remainTimeout -= passTime;
             }
             else {
                 readSelector.select();
@@ -183,9 +189,9 @@ public class NSocketConnection implements NIOConnection
                     }
                     else if (readLen > 0) {
                         readBuf.flip();
-                        if (readLen > remainLen) {
+                        if (readLen >= remainLen) {
                             readBuf.get(data, offsetNow, remainLen);
-                            totalReadLen = remainLen;
+                            totalReadLen += remainLen;
                             break;
                         }
                         else {
