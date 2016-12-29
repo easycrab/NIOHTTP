@@ -53,8 +53,9 @@ public class MyTestNIO
     
     public static void main(String[] args) {
 //        NHttpConnection conn = new NHttpConnection("http://101.231.126.26/share/tmp/bazi.apk", false, 5000);
+//        NHttpConnection conn = new NHttpConnection("http://www.journaldev.com/966/java-gzip-example-compress-decompress-file", false, 5000);
 //        NHttpsConnection conn = new NHttpsConnection("vip.163.com", false, 5000);
-        NHttpsConnection conn = new NHttpsConnection("www.wormly.com", false, 5000);
+        NHttpsConnection conn = new NHttpsConnection("https://www.ssllabs.com", false, 5000);
         
         try {
             System.out.println(getTimestamp() + " Ready to connect to server now...");
@@ -71,25 +72,48 @@ public class MyTestNIO
             int contentLen = conn.getContentLength();
             System.out.println(getTimestamp() + " ContentLength = " + contentLen);
             
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            int targetGetLen;
+            String content;
             if (conn.isChunked()) {
-                ByteArrayOutputStream baos = new ByteArrayOutputStream();
                 conn.readAllChunk(baos);
                 System.out.println(getTimestamp() + " Total Chunk Size = " + baos.size());
                 
-                String content = new String(baos.toByteArray(), "utf-8");
+                if (conn.isGzipContent()) {
+                    System.out.println(getTimestamp() + " response body is GZIP, need decompress first");
+                    byte[] gzipData = baos.toByteArray();
+                    baos.reset();
+                    conn.decompressGzipData(gzipData, baos);
+                }
+                
+                System.out.println(getTimestamp() + " Response Body Data Length: " + baos.size());
+                
+                targetGetLen = (baos.size() > 1024) ? 1024 : baos.size();
+                content = new String(baos.toByteArray(), 0, targetGetLen, "utf-8");
                 System.out.println(content);
 
             
             }
             else if (contentLen > 0) {
-                int targetGetLen = (contentLen > 1024) ? 1024 : contentLen;
-                byte[] body = new byte[targetGetLen];
+                byte[] body = new byte[contentLen];
                 System.out.println(getTimestamp() + " Try to receive connection body ...");
-                conn.readData(body, 0, targetGetLen);
+                conn.readData(body, 0, contentLen);
+                if (conn.isGzipContent()) {
+                    System.out.println(getTimestamp() + " response body is GZIP, need decompress first");
+                    conn.decompressGzipData(body, baos);
+
+                    targetGetLen = (baos.size() > 1024) ? 1024 : baos.size();
+                    content = new String(baos.toByteArray(), 0, targetGetLen, "utf-8");
+                    System.out.println(content);
+                }
+                else {
+                    targetGetLen = (contentLen > 1024) ? 1024 : contentLen;
+                    content = new String(body, 0, targetGetLen, "utf-8");
+                    System.out.println(content);
+                }
+
                 
-                String content = new String(body, "utf-8");
                 System.out.println(getTimestamp() + " Done!");
-                System.out.println(content);
 
             }
 //          */

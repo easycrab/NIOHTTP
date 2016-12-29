@@ -158,6 +158,7 @@ public class NSSLSocketConnection implements NIOConnection
 
         if (readAppBuffer.hasRemaining()) {
             int previousRemainLen = readAppBuffer.remaining();
+//            System.out.println("------>>> SSLSocket Read buffer, Remain:" + previousRemainLen);
             if (previousRemainLen > remainLen) {
                 readAppBuffer.get(data, offsetNow, remainLen);
                 totalReadLen = remainLen;
@@ -168,6 +169,7 @@ public class NSSLSocketConnection implements NIOConnection
                 offsetNow += previousRemainLen;
                 remainLen -= previousRemainLen;
                 totalReadLen += previousRemainLen;
+                System.out.println("------>>> SSLSocket Read from remain buffer, len:" + totalReadLen);
             }
 
         }
@@ -201,7 +203,8 @@ public class NSSLSocketConnection implements NIOConnection
                 remainLen -= readLen;
                 totalReadLen += readLen;
             }
-            
+            System.out.println("------>>> SSLSocket Read, total Now:" + totalReadLen);
+
         }
         return totalReadLen;
          

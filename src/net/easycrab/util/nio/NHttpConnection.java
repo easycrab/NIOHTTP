@@ -98,6 +98,17 @@ public class NHttpConnection
         return isChunkedResponse;
     }
     
+    public boolean isGzipContent() throws Exception
+    {
+        ensureHeaderRead();
+        boolean isGzip = false;
+        String value = responseHeaders.get("Content-Encoding");
+        if (value != null && "gzip".equalsIgnoreCase(value)) {
+            isGzip = true;
+        }
+        return isGzip;
+    }
+    
     public void connect() throws Exception
     {
         parseRequestUrl();
@@ -170,6 +181,7 @@ public class NHttpConnection
                 // empty line
                 if (lastChunkFound) {
                     needReadMore = false;
+                    System.out.println("Reach end of the chunk body, all data read!");
                 }
                 else {
                     throw new IOException("Unexpected empty line in chunk body!");
@@ -177,7 +189,8 @@ public class NHttpConnection
             }
             else if (lastChunkFound) {
                 // skip tailer header
-            }
+                System.out.println("It's a tailer header, skip it. Text:" + lineText);
+           }
             else {
                 // It's a chunk
                 place = lineText.indexOf(';');
@@ -186,6 +199,7 @@ public class NHttpConnection
 //                    if (place + 1 < lineText.length()) {
 //                        // it has chunk extension
 //                        chunkExt = lineText.substring(place + 1);
+//                        System.out.println("Next Chunk has extension, content: " + chunkExt);
 //                    }
                 }
                 else {
@@ -197,6 +211,7 @@ public class NHttpConnection
                     throw new IOException("Unaccepted chunk size line!" + lineText);
                 }
                 
+                System.out.println("Next Chunk found, size is " + chunkSize);
                 if (chunkSize == 0) {
                     // it's last chunk
                     System.out.println("Chunk size is 0, last chunk found!");
@@ -228,6 +243,18 @@ public class NHttpConnection
             
         }
         
+    }
+    
+    public void decompressGzipData(byte[] gzipData, java.io.OutputStream output) throws Exception
+    {
+        java.io.ByteArrayInputStream bais = new java.io.ByteArrayInputStream(gzipData);
+        java.util.zip.GZIPInputStream gis = new java.util.zip.GZIPInputStream(bais);
+        byte[] buffer = new byte[TMP_BUFFER_SIZE];
+        int len;
+        while ((len = gis.read(buffer)) != -1) {
+            output.write(buffer, 0, len);
+        }
+        gis.close();
     }
     
     protected void ensureHeaderRead() throws Exception
@@ -328,6 +355,11 @@ public class NHttpConnection
         sb.append(host);
         sb.append('\r');
         sb.append('\n');
+        
+        // add "Accept-Encoding: gzip" 
+        if (! requestHeaders.containsKey("Accept-Encoding")) {
+            requestHeaders.put("Accept-Encoding", "gzip");
+        }
         
         // Append Other Header
         Iterator<Entry<String, String>> headers = requestHeaders.entrySet().iterator();
