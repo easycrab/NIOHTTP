@@ -150,34 +150,61 @@ public class NSSLSocketConnection implements NIOConnection
               
     }
     
+    private int readFromReaminAppBuffer(byte[] data, int offset, int len) throws Exception
+    {
+        int readLen = 0;
+        int previousRemainLen = readAppBuffer.remaining();
+        if (previousRemainLen > len) {
+            readAppBuffer.get(data, offset, len);
+            readLen = len;
+        } else {
+            readAppBuffer.get(data, offset, previousRemainLen);
+            readLen = previousRemainLen;
+            System.out.println("------>>> SSLSocket Read from remain buffer, len:" + readLen);
+        }
+        return readLen;
+    }
+    
     public int read(long timeout, byte[] data, int offset, int len) throws Exception
     {
+        int readLen;
+
         int remainLen = len;
         int offsetNow = offset;
         int totalReadLen = 0;
 
         if (readAppBuffer.hasRemaining()) {
-            int previousRemainLen = readAppBuffer.remaining();
-//            System.out.println("------>>> SSLSocket Read buffer, Remain:" + previousRemainLen);
-            if (previousRemainLen > remainLen) {
-                readAppBuffer.get(data, offsetNow, remainLen);
-                totalReadLen = remainLen;
-                return totalReadLen;
+            readLen = readFromReaminAppBuffer(data, offsetNow, remainLen);
+            offsetNow += readLen;
+            remainLen -= readLen;
+            totalReadLen += readLen;
+        }
+        
+        while (remainLen > 0 && readNetBuffer.hasRemaining()) {
+            // try to consume the remain inbound net buffer
+            System.out.println("------>>> readNetBuffer has remaining!! len:" + readNetBuffer.remaining());
+            readAppBuffer.clear();
+            SSLEngineResult result;
+            result = sslEngine.unwrap(readNetBuffer, readAppBuffer);
+            System.out.println("------>>> Unwrapping from remain read net buffer - :" + result
+                    + " readAppBuffer.position(): " + readAppBuffer.position());
+            if (result.getStatus() != Status.OK && result.getStatus() != Status.BUFFER_UNDERFLOW) {
+                throw new IOException("--> Unexpected error for unwrap read net buffer!");
             }
-            else {
-                readAppBuffer.get(data, offsetNow, previousRemainLen);
-                offsetNow += previousRemainLen;
-                remainLen -= previousRemainLen;
-                totalReadLen += previousRemainLen;
-                System.out.println("------>>> SSLSocket Read from remain buffer, len:" + totalReadLen);
+            
+            readAppBuffer.flip();            
+            if (readAppBuffer.hasRemaining()) {
+                readLen = readFromReaminAppBuffer(data, offsetNow, remainLen);
+                offsetNow += readLen;
+                remainLen -= readLen;
+                totalReadLen += readLen;
             }
-
+            
         }
 
         long tsStart = System.currentTimeMillis();  
         long remainTimeout = timeout;
 
-        int readLen;
         while (remainLen > 0) {
             if (timeout > 0) {
                 long passTime = System.currentTimeMillis() - tsStart;
@@ -210,113 +237,6 @@ public class NSSLSocketConnection implements NIOConnection
          
     }
 
-    /*
-    public int read2(long timeout, byte[] data, int offset, int len) throws Exception
-    {
-        if (readSelector == null) {
-            readSelector = Selector.open();
-            channel.register(readSelector, SelectionKey.OP_READ);
-        }
-        
-        int remainLen = len;
-        int offsetNow = offset;
-        long tsNow;        
-        int totalReadLen = 0;
-
-        if (readAppBuffer.hasRemaining()) {
-            int previousRemainLen = readAppBuffer.remaining();
-            if (previousRemainLen > remainLen) {
-                readAppBuffer.get(data, offsetNow, remainLen);
-                totalReadLen = remainLen;
-                return totalReadLen;
-            }
-            else {
-                readAppBuffer.get(data, offsetNow, previousRemainLen);
-                offsetNow += previousRemainLen;
-                remainLen -= previousRemainLen;
-                totalReadLen += previousRemainLen;
-            }
-
-        }
-
-        int readLen;
-        SSLEngineResult result;
-        while (remainLen > 0) {
-            tsNow = System.currentTimeMillis();  
-            if (timeout > 0) {
-                readSelector.select(timeout);
-                if (System.currentTimeMillis() - tsNow > timeout) {
-                    // time out
-                    throw new IOException("Wait for connection readable timeout!");
-                }
-            }
-            else {
-                readSelector.select();
-            }
-            
-            Set<SelectionKey> selectedKeys = readSelector.selectedKeys();
-            Iterator<SelectionKey> keyIterator = selectedKeys.iterator();
-            if (keyIterator.hasNext()) {
-                SelectionKey key = keyIterator.next();
-                if (key.isReadable() ) {
-                    hsStatus = sslEngine.getHandshakeStatus();
-                    if (hsStatus == HandshakeStatus.NEED_UNWRAP) {
-                        readLen = channel.read(readNetBuffer);
-                        if (readLen < 0) {
-                            System.out.println("no data is read for unwrap. count=" + readLen);
-                            throw new IOException("No data is read for unwrap!");
-                        }
-                        System.out.println("data read: " + readLen);
-                        readNetBuffer.flip();
-                        readAppBuffer.clear();
-                        do {
-                            result = sslEngine.unwrap(readNetBuffer, readAppBuffer);
-                            System.out.println("Unwrapping - :" + result);
-                            // During an handshake re-negotiation we might need to
-                            // perform several unwraps to consume the handshake data.
-                        } while (result.getStatus() == SSLEngineResult.Status.OK
-                                && result.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.NEED_UNWRAP
-                                && result.bytesConsumed() == 0);
-                        if (readAppBuffer.position() == 0 && result.getStatus() == SSLEngineResult.Status.OK
-                                && readNetBuffer.hasRemaining()) {
-                            result = sslEngine.unwrap(readNetBuffer, readAppBuffer);
-                            System.out.println("Unwrapping -- : " + result);
-                        }
-
-                        status = result.getStatus();
-                        assert status != Status.BUFFER_OVERFLOW : "buffer not overflow." + status.toString();
-                        // Prepare the buffer to be written again.
-                        readNetBuffer.clear();
-                        // And the app buffer to be read.
-                        readAppBuffer.flip();
-
-                        readLen = readAppBuffer.remaining();
-                        
-                        if (readLen > 0) {
-                            if (readLen > remainLen) {
-                                readAppBuffer.get(data, offsetNow, remainLen);
-                                totalReadLen = remainLen;
-                                break;
-                            }
-                            else {
-                                readAppBuffer.get(data, offsetNow, readLen);
-                                offsetNow += readLen;
-                                remainLen -= readLen;
-                                totalReadLen += readLen;
-                            }
-                        }
-                        
-                    }
-
-                }
-            }
-            
-        }
-        return totalReadLen;
-         
-    }
-    */
-    
     private void processHandshake() throws Exception
     {        
         HandshakeStatus hsStatus;
@@ -398,6 +318,7 @@ public class NSSLSocketConnection implements NIOConnection
             do {
                 result = sslEngine.unwrap(readNetBuffer, readAppBuffer);
                 System.out.println("Unwrapping - :" + result);
+                System.out.println("------==>1> readNetBuffer remaining count:" + readNetBuffer.remaining());
                 // During an handshake re-negotiation we might need to
                 // perform several unwraps to consume the handshake data.
             } while (result.getStatus() == SSLEngineResult.Status.OK
@@ -416,6 +337,7 @@ public class NSSLSocketConnection implements NIOConnection
                     handshakeDone = true;
                 }
             }
+            System.out.println("------==>2> readNetBuffer remaining count:" + readNetBuffer.remaining());
 
             Status status = result.getStatus();
             if (status != Status.OK) {
@@ -434,7 +356,9 @@ public class NSSLSocketConnection implements NIOConnection
             }
             else { 
                 unwrapDone = true;
-                readNetBuffer.compact();
+                if (! handshakeDone) {
+                    readNetBuffer.compact();
+                }
 
             }
        }
@@ -539,7 +463,7 @@ public class NSSLSocketConnection implements NIOConnection
                 System.out.println("no data is read for upwrap. count=" + readLen);
                 throw new IOException("No data is read for unwrap!");
             }
-            System.out.println("data read: " + readLen);
+            System.out.println(" **======** data read: " + readLen);
             if (readLen > 0) {
                 readNetBuffer.flip();
                 
@@ -560,7 +484,8 @@ public class NSSLSocketConnection implements NIOConnection
         }
         readAppBuffer.flip();
         readLen = readAppBuffer.remaining();
-        System.out.println("Unwrapp result len : " + readLen);        
+        System.out.println("------==>>> Unwrapp result len : " + readLen);        
+        System.out.println("------==>>> readNetBuffer remaining count:" + readNetBuffer.remaining());
     }
     
     private void initSSLEngine() throws Exception
