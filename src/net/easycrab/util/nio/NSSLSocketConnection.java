@@ -33,7 +33,8 @@ public class NSSLSocketConnection implements NIOConnection
     private Selector            writeSelector;
 
     private InetSocketAddress   hostAddr;
-    private long                defaultTimeout;
+
+    private boolean             onlyCheckBlockTime = true;
     
     public NSSLSocketConnection(InetSocketAddress address)
     {
@@ -41,9 +42,7 @@ public class NSSLSocketConnection implements NIOConnection
     }
 
     public void connect(long timeout) throws Exception
-    {
-        defaultTimeout = timeout;
-        
+    {        
         initSSLEngine();
         initByteBuffer();
         
@@ -78,14 +77,13 @@ public class NSSLSocketConnection implements NIOConnection
         System.out.println("----** Begin Handshake Now ... **----");
         handshakeDone = false;
         sslEngine.beginHandshake();
-        processHandshake();
+        processHandshake(timeout);
         System.out.println("----** Handshake Completed! **----");
     }
     
     public void close() throws Exception
     {
         if (channel.isConnected()) {
-            System.out.println("----** close R/W Selector **----");
             if (writeSelector != null) {
                 writeSelector.close();
                 writeSelector = null;
@@ -99,6 +97,11 @@ public class NSSLSocketConnection implements NIOConnection
         }
     }
     
+    public void setTimeoutMode(boolean isOnlyCheckBlockTime)
+    {
+        onlyCheckBlockTime = isOnlyCheckBlockTime;
+    }
+    
     public void write(long timeout, byte[] data, int offset, int len) throws Exception
     {
         
@@ -108,6 +111,7 @@ public class NSSLSocketConnection implements NIOConnection
         int capacity = writeAppBuffer.capacity();
         long tsStart = System.currentTimeMillis();  
         long remainTimeout = timeout;
+
         boolean remainDataInBuf = false;
         writeAppBuffer.clear();
         while (remainLen > 0 || remainDataInBuf) {
@@ -133,16 +137,22 @@ public class NSSLSocketConnection implements NIOConnection
                     remainLen = 0; 
                 }
                 writeAppBuffer.flip();
-                System.out.println("writeAppBuffer remaining :" + writeAppBuffer.remaining());
+//                System.out.println("writeAppBuffer remaining :" + writeAppBuffer.remaining());
             }
             
             writeNetBuffer.clear();
-            SSLEngineResult result;
-            result = sslEngine.wrap(writeAppBuffer, writeNetBuffer);
-            System.out.println("---> Wrapping for Outbound - :" + result);
+//            SSLEngineResult result;
+//            result = 
+                    sslEngine.wrap(writeAppBuffer, writeNetBuffer);
+//            System.out.println("---> Wrapping for Outbound - :" + result);
 
             if (writeNetBuffer.position() > 0) {
-                flushNetBuffer(remainTimeout);
+                if (onlyCheckBlockTime) {
+                    flushNetBuffer(timeout);                    
+                }
+                else {
+                    flushNetBuffer(remainTimeout);
+                }
             }
 
             remainDataInBuf = writeAppBuffer.hasRemaining();
@@ -160,7 +170,7 @@ public class NSSLSocketConnection implements NIOConnection
         } else {
             readAppBuffer.get(data, offset, previousRemainLen);
             readLen = previousRemainLen;
-            System.out.println("------>>> SSLSocket Read from remain buffer, len:" + readLen);
+//            System.out.println("------>>> SSLSocket Read from remain buffer, len:" + readLen);
         }
         return readLen;
     }
@@ -182,12 +192,12 @@ public class NSSLSocketConnection implements NIOConnection
         
         while (remainLen > 0 && readNetBuffer.hasRemaining()) {
             // try to consume the remain inbound net buffer
-            System.out.println("------>>> readNetBuffer has remaining!! len:" + readNetBuffer.remaining());
+//            System.out.println("------>>> readNetBuffer has remaining!! len:" + readNetBuffer.remaining());
             readAppBuffer.clear();
             SSLEngineResult result;
             result = sslEngine.unwrap(readNetBuffer, readAppBuffer);
-            System.out.println("------>>> Unwrapping from remain read net buffer - :" + result
-                    + " readAppBuffer.position(): " + readAppBuffer.position());
+//            System.out.println("------>>> Unwrapping from remain read net buffer - :" + result
+//                    + " readAppBuffer.position(): " + readAppBuffer.position());
             if (result.getStatus() != Status.OK && result.getStatus() != Status.BUFFER_UNDERFLOW) {
                 throw new IOException("--> Unexpected error for unwrap read net buffer!");
             }
@@ -215,9 +225,13 @@ public class NSSLSocketConnection implements NIOConnection
                     throw new IOException("Read data from Inbound timeout!");
                 }
             }
-            waitForReadable(remainTimeout);
+            if (onlyCheckBlockTime) {
+                unwrapInboundData(timeout);
+            }
+            else {
+                unwrapInboundData(remainTimeout);
+            }
             
-            unwrapInboundData(remainTimeout);
             readLen = readAppBuffer.remaining();
             if (readLen > remainLen) {
                 readAppBuffer.get(data, offsetNow, remainLen);
@@ -230,29 +244,28 @@ public class NSSLSocketConnection implements NIOConnection
                 remainLen -= readLen;
                 totalReadLen += readLen;
             }
-            System.out.println("------>>> SSLSocket Read, total Now:" + totalReadLen);
+//            System.out.println("------>>> SSLSocket Read, total Now:" + totalReadLen);
 
         }
         return totalReadLen;
          
     }
 
-    private void processHandshake() throws Exception
+    private void processHandshake(long timeout) throws Exception
     {        
         HandshakeStatus hsStatus;
         while (! handshakeDone) {
             hsStatus = sslEngine.getHandshakeStatus();
-            System.out.println("Current HandshakeStatus -- : " + hsStatus);
+//            System.out.println("Current HandshakeStatus -- : " + hsStatus);
             if (hsStatus == HandshakeStatus.NEED_WRAP) {
-                wrapHandshakeData();
+                wrapHandshakeData(timeout);
             }
             else if (hsStatus == HandshakeStatus.NEED_UNWRAP) {
-                unwrapHandshakeData();
+                unwrapHandshakeData(timeout);
             }
             else if (hsStatus == HandshakeStatus.NEED_TASK) {
                 Runnable runnable;
                 while ((runnable = sslEngine.getDelegatedTask()) != null) {
-                    System.out.println("**** Debug Place **** SSLEngine Delegated Task");
                     runnable.run();
                 }
             }
@@ -265,32 +278,32 @@ public class NSSLSocketConnection implements NIOConnection
         }
     }
     
-    private void wrapHandshakeData() throws Exception
+    private void wrapHandshakeData(long timeout) throws Exception
     {
         SSLEngineResult result;
         writeNetBuffer.clear();
 
         result = sslEngine.wrap(dummyBuffer, writeNetBuffer);
         Status          status = result.getStatus();
-        System.out.println("wrapHandshakeData() status: " + status);        
+//        System.out.println("wrapHandshakeData() status: " + status);        
         if (status != Status.OK) {
             switch (status) {
             case BUFFER_OVERFLOW:
-                System.out.println("wrap to outbound (BUFFER_OVERFLOW)");
+//                System.out.println("wrap to outbound (BUFFER_OVERFLOW)");
                 throw new IOException("Handshake: wrap to outbound (BUFFER_OVERFLOW)");
             case BUFFER_UNDERFLOW:
-                System.out.println("wrap to outbound (BUFFER_UNDERFLOW)");
+//                System.out.println("wrap to outbound (BUFFER_UNDERFLOW)");
                 throw new IOException("Handshake: wrap to outbound (BUFFER_UNDERFLOW)");
             default:
                 // do nothing;
             }
         }
         
-        flushNetBuffer(defaultTimeout); 
+        flushNetBuffer(timeout); 
 
     }
     
-    private void unwrapHandshakeData() throws Exception
+    private void unwrapHandshakeData(long timeout) throws Exception
     {
         boolean unwrapDone = false;
         boolean previousUnderflow = false;
@@ -299,10 +312,10 @@ public class NSSLSocketConnection implements NIOConnection
         while (! unwrapDone) {
             
             if (previousUnderflow || readNetBuffer.position() == 0) {
-                waitForReadable(defaultTimeout);
+                waitForReadable(timeout);
                 
                 int readLen = channel.read(readNetBuffer);
-                System.out.println("Handshake: Inbound data read for upwrap. read Len:" + readLen);
+//                System.out.println("Handshake: Inbound data read for upwrap. read Len:" + readLen);
                 if (readLen < 0) {
                     throw new IOException("Handshake: No data is read for unwrap!");
                 }
@@ -317,8 +330,8 @@ public class NSSLSocketConnection implements NIOConnection
 
             do {
                 result = sslEngine.unwrap(readNetBuffer, readAppBuffer);
-                System.out.println("Unwrapping - :" + result);
-                System.out.println("------==>1> readNetBuffer remaining count:" + readNetBuffer.remaining());
+//                System.out.println("Unwrapping - :" + result);
+//                System.out.println("------==>1> readNetBuffer remaining count:" + readNetBuffer.remaining());
                 // During an handshake re-negotiation we might need to
                 // perform several unwraps to consume the handshake data.
             } while (result.getStatus() == SSLEngineResult.Status.OK
@@ -332,12 +345,12 @@ public class NSSLSocketConnection implements NIOConnection
             if (readAppBuffer.position() == 0 && result.getStatus() == Status.OK
                     && readNetBuffer.hasRemaining()) {
                 result = sslEngine.unwrap(readNetBuffer, readAppBuffer);
-                System.out.println("Unwrapping -* : " + result);
+//                System.out.println("Unwrapping -* : " + result);
                 if (result.getHandshakeStatus() == HandshakeStatus.FINISHED) {
                     handshakeDone = true;
                 }
             }
-            System.out.println("------==>2> readNetBuffer remaining count:" + readNetBuffer.remaining());
+//            System.out.println("------==>2> readNetBuffer remaining count:" + readNetBuffer.remaining());
 
             Status status = result.getStatus();
             if (status != Status.OK) {
@@ -456,21 +469,26 @@ public class NSSLSocketConnection implements NIOConnection
                     throw new IOException("Read data from Inbound timeout!");
                 }
             }
-            waitForReadable(remainTimeout);
+            if (onlyCheckBlockTime) {
+                waitForReadable(timeout);
+            }
+            else {
+                waitForReadable(remainTimeout);
+            }
 
             readLen = channel.read(readNetBuffer);
             if (readLen < 0) {
-                System.out.println("no data is read for upwrap. count=" + readLen);
+//                System.out.println("no data is read for unwrap. count=" + readLen);
                 throw new IOException("No data is read for unwrap!");
             }
-            System.out.println(" **======** data read: " + readLen);
+//            System.out.println(" **======** data read: " + readLen);
             if (readLen > 0) {
                 readNetBuffer.flip();
                 
                 SSLEngineResult result;
                 result = sslEngine.unwrap(readNetBuffer, readAppBuffer);
-                System.out.println("Unwrapping from Inbound- :" + result 
-                        + " readAppBuffer.position(): " + readAppBuffer.position());
+//                System.out.println("Unwrapping from Inbound- :" + result 
+//                        + " readAppBuffer.position(): " + readAppBuffer.position());
                 if (result.getStatus() == Status.BUFFER_UNDERFLOW) {
                     needReadMore = true;
                     readNetBuffer.compact();
@@ -484,8 +502,8 @@ public class NSSLSocketConnection implements NIOConnection
         }
         readAppBuffer.flip();
         readLen = readAppBuffer.remaining();
-        System.out.println("------==>>> Unwrapp result len : " + readLen);        
-        System.out.println("------==>>> readNetBuffer remaining count:" + readNetBuffer.remaining());
+//        System.out.println("------==>>> Unwrapp result len : " + readLen);        
+//        System.out.println("------==>>> readNetBuffer remaining count:" + readNetBuffer.remaining());
     }
     
     private void initSSLEngine() throws Exception
@@ -533,14 +551,20 @@ public class NSSLSocketConnection implements NIOConnection
         writeNetBuffer.flip();
         long tsNow;
         long remainTimeout = timeout;
-        int sendLen;
+//        int sendLen;
         while (writeNetBuffer.hasRemaining()) {
             tsNow = System.currentTimeMillis();
-            waitForWritable(remainTimeout);
-            System.out.println("Before output - writeNetBuffer.remaining()=" + writeNetBuffer.remaining());
-            sendLen = channel.write(writeNetBuffer);
-            System.out.println("After output - : writeNetBuffer.remaining()=" + writeNetBuffer.remaining() 
-            + " sendLength=" + sendLen);
+            if (onlyCheckBlockTime) {
+                waitForWritable(timeout);
+            }
+            else {
+                waitForWritable(remainTimeout);
+            }
+//            System.out.println("Before output - writeNetBuffer.remaining()=" + writeNetBuffer.remaining());
+//            sendLen = 
+                    channel.write(writeNetBuffer);
+//            System.out.println("After output - : writeNetBuffer.remaining()=" + writeNetBuffer.remaining() 
+//            + " sendLength=" + sendLen);
             if (writeNetBuffer.hasRemaining()) {
                 if (timeout > 0) {
                     long passTime = System.currentTimeMillis() - tsNow;

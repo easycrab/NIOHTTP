@@ -20,6 +20,7 @@ public class NSocketConnection implements NIOConnection
     private ByteBuffer          writeBuf;
     private Selector            readSelector;
     private Selector            writeSelector;
+    private boolean             onlyCheckBlockTime = true;
     
     private InetSocketAddress   hostAddr;
     
@@ -75,26 +76,38 @@ public class NSocketConnection implements NIOConnection
         }
     }
     
+    public void setTimeoutMode(boolean isOnlyCheckBlockTime)
+    {
+        onlyCheckBlockTime = isOnlyCheckBlockTime;
+    }
+    
     public void write(long timeout, byte[] data, int offset, int len) throws Exception
     {
         if (writeSelector == null) {
             writeSelector = Selector.open();
             channel.register(writeSelector, SelectionKey.OP_WRITE);
         }
-        
+
         int remainLen = len;
         int offsetNow = offset;
         long tsNow;  
         long remainTimeout = timeout;
+        long waitingTime;
 
         writeBuf.clear();
         writeBuf.flip();
         while (remainLen > 0 || writeBuf.hasRemaining()) {
             tsNow = System.currentTimeMillis();  
             if (timeout > 0) {
-                writeSelector.select(remainTimeout);
+                if (onlyCheckBlockTime) {
+                    waitingTime = timeout;
+                }
+                else {
+                    waitingTime = remainTimeout;
+                }
+                writeSelector.select(waitingTime);
                 long passTime = System.currentTimeMillis() - tsNow;
-                if (passTime >= remainTimeout) {
+                if (passTime >= waitingTime) {
                     // time out
                     throw new IOException("Wait for connection writable timeout!");
                 }
@@ -140,9 +153,11 @@ public class NSocketConnection implements NIOConnection
         
         int remainLen = len;
         int offsetNow = offset;
-        long tsNow;        
-        long remainTimeout = timeout;
         int totalReadLen = 0;
+        
+        long tsStart;        
+        long remainTimeout = timeout;
+        long waitingTime;
 
         if (readBuf.hasRemaining()) {
             int previousRemainLen = readBuf.remaining();
@@ -161,11 +176,17 @@ public class NSocketConnection implements NIOConnection
         }
 
         while (remainLen > 0) {
-            tsNow = System.currentTimeMillis();  
             if (timeout > 0) {
-                readSelector.select(remainTimeout);
-                long passTime = System.currentTimeMillis() - tsNow;
-                if (passTime >= remainTimeout) {
+                if (onlyCheckBlockTime) {
+                    waitingTime = timeout;
+                }
+                else {
+                    waitingTime = remainTimeout;
+                }
+                tsStart = System.currentTimeMillis();    
+                readSelector.select(waitingTime);
+                long passTime = System.currentTimeMillis() - tsStart;
+                if (passTime >= waitingTime) {
                     // time out
                     throw new IOException("Wait for connection readable timeout!");
                 }
@@ -182,7 +203,7 @@ public class NSocketConnection implements NIOConnection
                 if (key.isReadable() ) {
                     readBuf.clear();
                     int readLen = channel.read(readBuf);
-                    
+        
                     if (readLen == -1) {
                         // the read channel is not available now?
                         throw new IOException("Cannot read more from the connection!");
@@ -203,7 +224,7 @@ public class NSocketConnection implements NIOConnection
                     }
                 }
             }
-            
+
         }
         return totalReadLen;
          

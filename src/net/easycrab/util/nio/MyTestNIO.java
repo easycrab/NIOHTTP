@@ -52,14 +52,16 @@ public class MyTestNIO
     }
     
     public static void main(String[] args) {
-//        NHttpConnection conn = new NHttpConnection("http://101.231.126.26/share/tmp/bazi.apk", false, 5000);
-//        NHttpConnection conn = new NHttpConnection("http://www.journaldev.com/966/java-gzip-example-compress-decompress-file", false, 5000);
-//        NHttpsConnection conn = new NHttpsConnection("vip.163.com", false, 5000);
         NHttpsConnection conn = new NHttpsConnection("https://www.ssllabs.com", false, 5000);
         
         try {
             System.out.println(getTimestamp() + " Ready to connect to server now...");
             conn.connect();
+            System.out.println(getTimestamp() + " Server was connected!");
+
+            System.out.println(getTimestamp() + " Reset Timeout Mode as NotOnlyCheckBlockTime!");
+            conn.setTimeoutMode(false);
+            
 //            System.out.println(getTimestamp() + " Connect Done! Sleep 1 seconds ...");
 //            Thread.sleep(1000);
 //            System.out.println(getTimestamp() + " Wake up! Try to close the connection ...");

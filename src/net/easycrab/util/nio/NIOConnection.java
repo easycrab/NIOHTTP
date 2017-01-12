@@ -10,4 +10,6 @@ public interface NIOConnection
     
     public int read(long timeout, byte[] data, int offset, int len) throws Exception;
     
+    public void setTimeoutMode(boolean isOnlyCheckBlockTime);
+    
 }

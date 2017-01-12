@@ -133,6 +133,13 @@ public class NHttpConnection
         timeout = newTimeout;
     }
     
+    public void setTimeoutMode(boolean isOnlyCheckBlockTime)
+    {
+        if (isConnected) {
+            connection.setTimeoutMode(isOnlyCheckBlockTime);
+        }
+    }
+    
     public void sendData(byte[] data, int offset, int len) throws Exception
     {
         if (! isConnected) {
@@ -181,7 +188,7 @@ public class NHttpConnection
                 // empty line
                 if (lastChunkFound) {
                     needReadMore = false;
-                    System.out.println("Reach end of the chunk body, all data read!");
+//                    System.out.println("Reach end of the chunk body, all data read!");
                 }
                 else {
                     throw new IOException("Unexpected empty line in chunk body!");
@@ -189,7 +196,7 @@ public class NHttpConnection
             }
             else if (lastChunkFound) {
                 // skip tailer header
-                System.out.println("It's a tailer header, skip it. Text:" + lineText);
+//                System.out.println("It's a tailer header, skip it. Text:" + lineText);
            }
             else {
                 // It's a chunk
@@ -211,10 +218,10 @@ public class NHttpConnection
                     throw new IOException("Unaccepted chunk size line!" + lineText);
                 }
                 
-                System.out.println("Next Chunk found, size is " + chunkSize);
+//                System.out.println("Next Chunk found, size is " + chunkSize);
                 if (chunkSize == 0) {
                     // it's last chunk
-                    System.out.println("Chunk size is 0, last chunk found!");
+//                    System.out.println("Chunk size is 0, last chunk found!");
                     lastChunkFound = true;
                 }
                 else {
@@ -326,7 +333,6 @@ public class NHttpConnection
         }
         
         if (portStr != null) {
-            System.out.println("== Debug port str:" + portStr);
             try {
                 port = Integer.parseInt(portStr);
             } catch (Exception e) {
@@ -427,8 +433,8 @@ public class NHttpConnection
         if (headers == null || headers.length == 0) {
             throw new IOException("Error, no response header received!");
         }
-        System.out.println("Got Response Header:");
-        System.out.println(respHeader);
+//        System.out.println("Got Response Header:");
+//        System.out.println(respHeader);
         
         int place1;
         int place2;
